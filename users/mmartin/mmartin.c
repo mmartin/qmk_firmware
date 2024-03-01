@@ -80,7 +80,7 @@ uint16_t achordion_timeout(uint16_t tap_hold_keycode) {
         case LT(_FUN, KC_BSPC):
             return 0;
     }
-    return 1000;
+    return 10000;
 }
 
 bool achordion_eager_mod(uint8_t mod) {
@@ -95,12 +95,37 @@ bool achordion_eager_mod(uint8_t mod) {
     return false;
 }
 
-static bool oneshot_mod_tap(uint16_t keycode, keyrecord_t* record) {
-    if (!get_mods() && record->tap.count == 0 && record->event.pressed) {
-        const uint8_t mods = (keycode >> 8) & 0x1f;
-        add_oneshot_mods(((mods & 0x10) == 0) ? mods : (mods << 4));
-        return false;
+uint8_t mod5_to_mod8(uint8_t mods) {
+    return ((mods & 0b10000) == 0) ? mods : (mods << 4);
+}
+
+static uint8_t magic_mod = 0;
+static uint8_t magic_mod_time = 0;
+static keyrecord_t magic_mod_record = { 0 };
+static bool magic_mod_tap = false;
+
+static bool oneshot_mod_tap(uint16_t keycode, keyrecord_t *record) {
+    uint8_t key_mod = mod5_to_mod8(mod_config(QK_MOD_TAP_GET_MODS(keycode)));
+    uint8_t mods = get_mods() & ~key_mod;
+
+    if (record->tap.count == 0) {
+        if (record->event.pressed && !mods && !magic_mod) {
+            add_oneshot_mods(key_mod);
+
+            magic_mod = key_mod;
+            magic_mod_time = record->event.time;
+            magic_mod_tap = false;
+
+            return false;
+        } else if (!record->event.pressed && magic_mod) {
+            magic_mod = 0;
+
+            if (timer_elapsed(record->event.time) > 300) {
+                del_oneshot_mods(key_mod);
+            }
+        }
     }
+
     return true;
 }
 
@@ -110,25 +135,49 @@ bool process_record_user(uint16_t keycode, keyrecord_t *record) {
     switch (keycode) {
         case LSFT_T(KC_T):
         case RSFT_T(KC_N):
-            return oneshot_mod_tap(keycode, record);
+            if (!oneshot_mod_tap(keycode, record)) { return false; }
+    }
 
-        case LALT_T(KC_I):
-        case LALT_T(KC_R):
-        case LCTL_T(KC_S):
-        case LGUI_T(KC_A):
-        case RALT_T(KC_DOT):
-        case RALT_T(KC_X):
-        case RCTL_T(KC_E):
-        case RGUI_T(KC_O):
-            uint8_t mods = get_oneshot_mods();
-            if (mods && record->event.pressed && record->tap.count == 0) {
-                clear_oneshot_mods();
-                set_mods(mods);
+    bool is_tappable = IS_QK_BASIC(keycode)
+        || (IS_QK_MOD_TAP(keycode) && record->tap.count)
+        || (IS_QK_LAYER_TAP(keycode) && record->tap.count);
+
+    if (is_tappable) {
+        if (magic_mod) {
+            if (record->event.pressed && !get_oneshot_mods()) {
+                magic_mod_record = *record;
+                magic_mod_tap = true;
+                return false;
+            } else if (!record->event.pressed && magic_mod_tap) {
+                add_mods(magic_mod);
+                magic_mod = 0;
+                process_record(&magic_mod_record);
+                magic_mod_tap = 0;
             }
+        } else if (magic_mod_tap && !record->event.pressed) {
+            magic_mod_tap = false;
+            process_record(&magic_mod_record);
+        }
+    } else if ((IS_QK_MOD_TAP(keycode) || IS_QK_LAYER_TAP(keycode))
+                && magic_mod == get_oneshot_mods()
+                && record->tap.count == 0 && record->event.pressed) {
+        del_oneshot_mods(magic_mod);
+        add_mods(magic_mod);
+        magic_mod = 0;
     }
 
     return true;
 };
+
+#ifdef RGB_MATRIX_ENABLE
+void oneshot_mods_changed_user(uint8_t mods) {
+    if (mods) {
+        rgb_matrix_sethsv(0, 255, rgb_matrix_get_val());
+    } else {
+        rgb_matrix_sethsv(200, 69, rgb_matrix_get_val());
+    }
+}
+#endif
 
 bool get_hold_on_other_key_press(uint16_t keycode, keyrecord_t *record) {
     if (keycode == LT(_NAV, KC_TAB)) { return true; }
